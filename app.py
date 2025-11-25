@@ -43,7 +43,7 @@ def call_gemini_2_0(api_key, image, style_text):
     img_str = base64.b64encode(buffered.getvalue()).decode()
 
     # --- 關鍵修正：這裡直接使用你清單上有的模型 ---
-    target_model = "gemini-2.0-flash" 
+    target_model = "gemini-2.0-pro-exp" 
     
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{target_model}:generateContent?key={api_key}"
     headers = {'Content-Type': 'application/json'}
