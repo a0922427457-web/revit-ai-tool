@@ -4,6 +4,7 @@ import requests
 import os
 import base64
 import io
+import time  # <--- 新增時間控制模組
 from PIL import Image
 
 # --- 1. 頁面設定 ---
@@ -35,23 +36,19 @@ if not gemini_key:
 if replicate_api:
     os.environ["REPLICATE_API_TOKEN"] = replicate_api
 
-# --- 4. 核心邏輯：Gemini 分析 ---
+# --- 4. 核心邏輯：Gemini 分析 (含自動重試機制) ---
 def call_gemini_advanced(api_key, model_image, ref_image, style_text, user_text, is_clean_mode):
     content_parts = []
     
-    # 根據是否開啟「專注模式」調整 AI 指令
-    background_instruction = ""
-    if is_clean_mode:
-        background_instruction = "IMPORTANT: Keep the background CLEAN and MINIMAL. Use a studio lighting setting or simple sky. Do NOT invent complex landscapes, forests, or cities around the building."
-    else:
-        background_instruction = "Generate a realistic environment suitable for the building."
-
+    # 指令
+    bg_instr = "Keep background CLEAN and MINIMAL, studio lighting." if is_clean_mode else "Generate a realistic environment."
+    
     system_instruction = f"""
     You are an expert architectural visualizer. 
     Task: Create a highly detailed Stable Diffusion prompt for ControlNet.
-    1. Base Geometry: Analyze the FIRST image (Line Drawing). Keep the geometry description accurate.
+    1. Base Geometry: Analyze the FIRST image (Line Drawing). Keep geometry accurate.
     2. Target Style: {style_text}.
-    3. Background: {background_instruction}
+    3. Background: {bg_instr}
     """
     content_parts.append({"text": system_instruction})
     
@@ -68,28 +65,43 @@ def call_gemini_advanced(api_key, model_image, ref_image, style_text, user_text,
         ref_image.save(buf_ref, format="JPEG")
         img_ref_str = base64.b64encode(buf_ref.getvalue()).decode()
         content_parts.append({"inline_data": {"mime_type": "image/jpeg", "data": img_ref_str}})
-        content_parts.append({"text": "Above is the STYLE REFERENCE. Adopt its materials and lighting."})
+        content_parts.append({"text": "Above is the STYLE REFERENCE."})
     
     # User Input
     if user_text:
-        content_parts.append({"text": f"User's specific requirements (Translate to English keywords): {user_text}"})
+        content_parts.append({"text": f"User requirements: {user_text}"})
 
-    content_parts.append({"text": "Output format: English keywords separated by commas. No sentences. End with: architectural photography."})
+    content_parts.append({"text": "Output format: English keywords separated by commas. End with: architectural photography."})
 
+    # 目標模型
     target_model = "gemini-2.0-flash"
-    
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{target_model}:generateContent?key={api_key}"
     headers = {'Content-Type': 'application/json'}
     data = {"contents": [{"parts": content_parts}]}
     
-    try:
-        response = requests.post(url, headers=headers, json=data)
-        if response.status_code == 200:
-            return response.json()['candidates'][0]['content']['parts'][0]['text']
-        else:
-            return f"Error {response.status_code}: {response.text}"
-    except Exception as e:
-        return f"連線錯誤: {str(e)}"
+    # --- 自動重試迴圈 (Retry Loop) ---
+    max_retries = 3  # 最多試 3 次
+    for attempt in range(max_retries):
+        try:
+            response = requests.post(url, headers=headers, json=data)
+            
+            if response.status_code == 200:
+                return response.json()['candidates'][0]['content']['parts'][0]['text']
+            
+            elif response.status_code == 429:
+                # 如果遇到 429 (太快)，就休息一下
+                wait_time = (attempt + 1) * 2  # 第一次等2秒，第二次等4秒...
+                st.toast(f"⏳ 請求太快，正在排隊重試中 ({attempt+1}/{max_retries})...")
+                time.sleep(wait_time)
+                continue # 重新跑一次迴圈
+            
+            else:
+                return f"Error {response.status_code}: {response.text}"
+                
+        except Exception as e:
+            return f"連線錯誤: {str(e)}"
+    
+    return "Error 429: 系統忙碌中，請等待 1 分鐘後再試。"
 
 # --- 5. 介面佈局 ---
 col1, col2 = st.columns([1, 1])
@@ -102,7 +114,6 @@ with col1:
         st.image(image_model, caption="幾何模型", use_column_width=True)
 
     st.write("---")
-    
     uploaded_ref = st.file_uploader("🎨 上傳風格參考圖 (選填)", type=["jpg", "png", "jpeg"])
     if uploaded_ref:
         st.image(uploaded_ref, caption="風格參考", width=300)
@@ -110,15 +121,9 @@ with col1:
     st.write("---")
     st.subheader("2. 設計指令")
     
-    style_option = st.selectbox(
-        "選擇基礎風格", 
-        ["現代玻璃帷幕 (Modern Glass Facade)", "清水模建築 (Concrete Brutalist)", "紅磚工業風 (Industrial Brick)", "溫暖木質度假風 (Warm Wooden Resort)", "純白未來主義 (Futuristic White)", "日式禪風 (Japanese Zen)"]
-    )
-    
+    style_option = st.selectbox("選擇基礎風格", ["現代玻璃帷幕 (Modern Glass Facade)", "清水模建築 (Concrete Brutalist)", "紅磚工業風 (Industrial Brick)", "溫暖木質度假風 (Warm Wooden Resort)", "純白未來主義 (Futuristic White)", "日式禪風 (Japanese Zen)"])
     user_input = st.text_area("✍️ 額外指令 (中文)", height=80)
-    
-    # --- 新增：專注模式開關 ---
-    clean_mode = st.checkbox("🎯 專注模型 (純淨背景/不亂加配景)", value=True, help="勾選後，AI 會使用攝影棚光或乾淨天空，並強制移除樹木、街道、人車。")
+    clean_mode = st.checkbox("🎯 專注模型 (純淨背景)", value=True)
     
     if st.button("✨ 呼叫 Gemini 融合分析"):
         if not gemini_key:
@@ -126,10 +131,8 @@ with col1:
         elif not uploaded_file:
             st.error("請上傳模型圖片！")
         else:
-            with st.spinner("Gemini 正在分析 (已啟用專注模式)..." if clean_mode else "Gemini 正在分析..."):
+            with st.spinner("Gemini 正在分析..."):
                 ref_img_obj = Image.open(uploaded_ref) if uploaded_ref else None
-                
-                # 傳入 clean_mode 參數
                 result = call_gemini_advanced(gemini_key, image_model, ref_img_obj, style_option, user_input, clean_mode)
                 
                 if "Error" in result:
@@ -147,16 +150,12 @@ with col2:
     with col_opt1:
         season = st.selectbox("🍂 季節", ["無指定 (None)", "春季 (Spring)", "夏季 (Summer)", "秋季 (Autumn)", "冬季 (Winter)"])
         weather = st.selectbox("⛈️ 天氣", ["晴朗 (Sunny)", "多雲 (Cloudy)", "陰天 (Overcast)", "下雨 (Rainy)", "起霧 (Foggy)", "下雪 (Snowy)"])
-    
     with col_opt2:
         resolution = st.selectbox("📐 出圖大小", ["512", "768", "1024"], index=1)
         quality_mode = st.radio("💎 出圖品質", ["標準 (快速)", "高品質 (較慢)"], index=0)
 
     base_prompt = st.text_area("AI 生成的基礎提示詞", value=st.session_state.ai_prompt, height=150)
-    
-    # 預設的負面提示詞
-    default_negative = "low quality, blurry, text, watermark, bad perspective, deformed"
-    n_prompt = st.text_input("負面提示詞", value=default_negative)
+    n_prompt = st.text_input("負面提示詞", "low quality, blurry, text, watermark, bad perspective, deformed, people, ugly, cars")
     
     with st.expander("🛠️ 進階參數"):
         creativity = st.slider("創意度 (Scale)", 5.0, 20.0, 9.0)
@@ -168,26 +167,20 @@ with col2:
         else:
             with st.spinner("AI 正在繪圖中..."):
                 try:
-                    # 1. 處理 Prompt (加入季節天氣)
                     added_prompts = []
-                    
-                    # 如果開啟「專注模式」，強制加入攝影棚關鍵字
                     if clean_mode:
                         added_prompts.append("clean background, studio lighting, minimal environment, clear sky")
                     else:
-                        # 只有在非專注模式下，才強調季節天氣 (避免衝突)
                         if "None" not in season: added_prompts.append(season.split("(")[1].replace(")", ""))
                         if "None" not in weather: added_prompts.append(weather.split("(")[1].replace(")", ""))
                     
                     added_prompts.append("photorealistic, 8k, masterpiece, highly detailed")
                     final_full_prompt = f"{base_prompt}, {', '.join(added_prompts)}"
 
-                    # 2. 處理負面提示詞 (如果是專注模式，要加強禁止項目)
                     final_negative = n_prompt
                     if clean_mode:
-                        final_negative += ", trees, forest, city, street, cars, people, landscape, complex background, busy street, mountains"
+                        final_negative += ", trees, forest, city, street, cars, people, landscape, complex background"
 
-                    # 3. 設定品質
                     num_steps = 50 if quality_mode == "高品質 (較慢)" else 20
 
                     with open("temp_model.jpg", "wb") as f:
@@ -199,7 +192,7 @@ with col2:
                             input={
                                 "image": image_file,
                                 "prompt": final_full_prompt,
-                                "negative_prompt": final_negative, # 使用加強版的負面提示詞
+                                "negative_prompt": final_negative,
                                 "image_resolution": resolution,
                                 "scale": creativity,
                                 "ddim_steps": num_steps,
