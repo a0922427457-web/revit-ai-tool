@@ -59,7 +59,7 @@ with col1:
                 with st.spinner("Gemini 正在觀察你的設計..."):
                     try:
                         # 使用最新的 1.5 Flash
-                        model = genai.GenerativeModel('gemini-1.5-flash-latest')
+                        model = genai.GenerativeModel('gemini-pro')
                         
                         prompt_request = f"""
                         You are an architectural visualizer. Look at this building line drawing.
