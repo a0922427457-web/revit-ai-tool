@@ -120,4 +120,50 @@ with col1:
             st.error("請上傳模型圖片！")
         else:
             with st.spinner("Gemini 正在思考..."):
-                result = call_gemini_advanced(gemini_key, image_model, image_ref, style_option, user_input
+                result = call_gemini_advanced(gemini_key, image_model, image_ref, style_option, user_input)
+                if "Error" in result:
+                    st.error("分析失敗")
+                    st.code(result)
+                else:
+                    st.session_state.ai_prompt = result
+                    st.success("Prompt 生成完成！")
+                    st.rerun()
+
+with col2:
+    st.subheader("3. 渲染與微調")
+    final_prompt = st.text_area("最終提示詞", value=st.session_state.ai_prompt, height=200)
+    n_prompt = st.text_input("負面提示詞", "low quality, blurry, text, watermark, bad perspective, deformed, people, ugly, cars")
+    
+    with st.expander("🛠️ 進階參數"):
+        creativity = st.slider("創意度 (Scale)", 5.0, 20.0, 9.0)
+        # 注意：ControlNet 的強度通常是 0.0 到 2.0，這裡沒問題
+        strength = st.slider("線條鎖定強度", 0.0, 2.0, 1.0)
+
+    if st.button("🎨 開始渲染 (Start Render)"):
+        if not replicate_api or not uploaded_file:
+            st.error("資料不全")
+        else:
+            with st.spinner("AI 正在繪圖中..."):
+                try:
+                    with open("temp_model.jpg", "wb") as f:
+                        f.write(uploaded_file.getbuffer())
+                    
+                    with open("temp_model.jpg", "rb") as image_file:
+                        output = replicate.run(
+                            "jagilley/controlnet-canny:aff48af9c68d162388d230a2ab003f68d2638d88307bdaf1c2f1ac95079c9613",
+                            input={
+                                "image": image_file,
+                                "prompt": final_prompt,
+                                "negative_prompt": n_prompt,
+                                "image_resolution": "768",  # <--- 修正處：加上了雙引號，變成文字格式
+                                "scale": creativity,
+                                "return_image": True 
+                            }
+                        )
+                    image_url = output[1] if isinstance(output, list) else output
+                    st.success("渲染完成！")
+                    st.image(image_url, use_column_width=True)
+                except Exception as e:
+                    st.error(f"渲染失敗: {e}")
+                    if "402" in str(e):
+                        st.warning("💡 提示：Replicate 額度不足，請儲值。")
