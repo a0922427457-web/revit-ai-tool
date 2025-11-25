@@ -3,153 +3,103 @@ import replicate
 import requests
 import os
 import base64
-import json
-from PIL import Image
 import io
+from PIL import Image
 
-# --- 1. 頁面設定 ---
-st.set_page_config(page_title="Revit 智慧渲染站", layout="wide", page_icon="🏢")
-st.markdown("""
-<style>
-#MainMenu {visibility: hidden;}
-footer {visibility: hidden;}
-</style>
-""", unsafe_allow_html=True)
+# --- 頁面設定 ---
+st.set_page_config(page_title="Revit 渲染站 (診斷版)", layout="wide", page_icon="🔧")
+st.title("🔧 系統診斷模式")
+st.warning("目前處於偵錯模式，若發生錯誤將會顯示詳細代碼。")
 
-st.title("🏢 公司專用：Revit 模型 AI 渲染器 (自動切換版)")
-
-# --- 2. 初始化 Session State ---
+# --- 初始化 ---
 if "ai_prompt" not in st.session_state:
     st.session_state.ai_prompt = ""
 
-# --- 3. 讀取金鑰 ---
+# --- 讀取金鑰 ---
+# 優先從 Secrets 讀取
 replicate_api = st.secrets.get("REPLICATE_API_TOKEN")
 gemini_key = st.secrets.get("GOOGLE_API_KEY")
 
-if not replicate_api:
-    replicate_api = st.sidebar.text_input("Replicate Token", type="password")
-if not gemini_key:
-    gemini_key = st.sidebar.text_input("Gemini API Key", type="password")
+# 側邊欄強制顯示金鑰輸入框 (方便測試)
+st.sidebar.header("🔑 金鑰測試區")
+user_gemini_key = st.sidebar.text_input("在此手動輸入 Gemini Key (排除 Secrets 設定錯誤)", value=gemini_key if gemini_key else "", type="password")
+user_replicate_key = st.sidebar.text_input("Replicate Token", value=replicate_api if replicate_api else "", type="password")
 
-if replicate_api:
-    os.environ["REPLICATE_API_TOKEN"] = replicate_api
-
-# --- 4. 萬能連線函數 (自動嘗試多種模型) ---
-def call_gemini_vision(api_key, image, style_text):
-    # 圖片轉碼
+# --- 診斷用連線函數 ---
+def debug_gemini(api_key, image):
+    # 轉檔
     buffered = io.BytesIO()
     image.save(buffered, format="JPEG")
     img_str = base64.b64encode(buffered.getvalue()).decode()
 
-    # 準備我們要嘗試的模型清單 (如果第一個失敗，就試下一個)
-    # 包含了最新版、穩定版、跟特定版號
-    models_to_try = [
-        "gemini-1.5-flash-latest", # 最新版 Flash
-        "gemini-1.5-flash-001",    # 指定版號 Flash
-        "gemini-1.5-pro-latest",   # 最新版 Pro (比較慢但強大)
-        "gemini-1.5-pro-001"       # 指定版號 Pro
-    ]
-
+    # 測試最標準的模型
+    target_model = "gemini-1.5-flash"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{target_model}:generateContent?key={api_key}"
+    
     headers = {'Content-Type': 'application/json'}
     data = {
         "contents": [{
             "parts": [
-                {"text": f"You are an architectural visualizer. Look at this image. Create a detailed English prompt for ControlNet. Describe the building geometry, materials, and lighting. Style: {style_text}. Format: Keywords separated by commas. No sentences."},
-                {"inline_data": {
-                    "mime_type": "image/jpeg",
-                    "data": img_str
-                }}
+                {"text": "Describe this building in 10 words."}, # 簡單指令測試
+                {"inline_data": {"mime_type": "image/jpeg", "data": img_str}}
             ]
         }]
     }
 
-    # 開始迴圈嘗試
-    for model_name in models_to_try:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
-        try:
-            response = requests.post(url, headers=headers, json=data, timeout=30)
+    try:
+        response = requests.post(url, headers=headers, json=data, timeout=30)
+        
+        # 顯示詳細診斷資訊
+        st.write("---")
+        st.write(f"📡 嘗試連線模型: `{target_model}`")
+        st.write(f"📡 HTTP 狀態碼: `{response.status_code}`")
+        
+        if response.status_code == 200:
+            return "SUCCESS", response.json()
+        else:
+            # 回傳完整的錯誤訊息
+            return "ERROR", response.text
             
-            if response.status_code == 200:
-                # 成功！解析結果
-                result = response.json()
-                text = result['candidates'][0]['content']['parts'][0]['text']
-                return f"SUCCESS|{model_name}|{text}" # 回傳成功標記
-            else:
-                # 失敗，印出這個模型為何失敗，然後繼續下一個
-                print(f"嘗試 {model_name} 失敗: {response.status_code}")
-                continue 
-        except Exception as e:
-            print(f"連線錯誤: {e}")
-            continue
+    except Exception as e:
+        return "CRITICAL_ERROR", str(e)
 
-    # 如果全部都失敗
-    return "ERROR|所有模型都嘗試失敗，請檢查 API Key 是否正確或有權限限制。"
-
-# --- 5. 介面佈局 ---
+# --- 介面 ---
 col1, col2 = st.columns([1, 1])
 
 with col1:
-    st.subheader("1. 上傳模型圖片")
-    uploaded_file = st.file_uploader("請上傳 JPG/PNG", type=["jpg", "png", "jpeg"])
+    st.subheader("1. 診斷測試")
+    uploaded_file = st.file_uploader("上傳一張小圖片進行測試", type=["jpg", "png", "jpeg"])
     
-    if uploaded_file:
-        image = Image.open(uploaded_file)
-        st.image(image, caption="原始模型", use_column_width=True)
-
-        st.subheader("2. 環境設定")
-        style_option = st.selectbox(
-            "選擇風格", 
-            ["Modern Glass Facade", "Concrete Brutalist", "Industrial Brick", "Wooden Resort", "Futuristic White"]
-        )
-        
-        if st.button("✨ 呼叫 Gemini 分析模型"):
-            if not gemini_key:
-                st.error("缺少 Gemini Key！")
+    if uploaded_file and st.button("🚨 開始診斷"):
+        if not user_gemini_key:
+            st.error("❌ 沒有偵測到 API Key！請在左側輸入。")
+        else:
+            image = Image.open(uploaded_file)
+            st.info("正在發送請求給 Google...")
+            
+            # 執行診斷
+            status, result = debug_gemini(user_gemini_key, image)
+            
+            if status == "SUCCESS":
+                st.success("✅ 連線成功！API Key 運作正常。")
+                st.json(result) # 顯示成功的回傳資料
+                # 這裡簡單抓取文字
+                try:
+                    text = result['candidates'][0]['content']['parts'][0]['text']
+                    st.session_state.ai_prompt = text
+                except:
+                    pass
             else:
-                with st.spinner("Gemini 正在嘗試連線 (會自動切換模型)..."):
-                    # 呼叫自動切換函數
-                    result_raw = call_gemini_vision(gemini_key, image, style_option)
-                    
-                    if result_raw.startswith("ERROR"):
-                        st.error(result_raw.split("|")[1])
-                    elif result_raw.startswith("SUCCESS"):
-                        _, model_used, prompt_text = result_raw.split("|", 2)
-                        st.success(f"分析成功！(使用模型: {model_used})")
-                        st.session_state.ai_prompt = prompt_text + ", photorealistic, 8k, architectural photography, cinematic lighting"
-                        st.rerun()
-                    else:
-                        st.error("未知錯誤")
+                st.error("❌ 連線失敗")
+                st.write("👇 **請把下面這段錯誤訊息截圖或複製給我：**")
+                st.code(result, language="json")
 
 with col2:
-    st.subheader("3. 渲染操作")
-    final_prompt = st.text_area("提示詞 (請保持英文)", value=st.session_state.ai_prompt, height=150)
-    n_prompt = st.text_input("負面提示詞", "low quality, blurry, text, watermark, bad perspective, deformed, people, ugly")
-    
-    if st.button("🎨 開始渲染 (Start Render)"):
-        if not replicate_api:
-            st.error("缺少 Replicate Token！")
-        elif not uploaded_file:
-            st.error("請先上傳圖片！")
+    st.subheader("2. 渲染測試")
+    final_prompt = st.text_area("提示詞", value=st.session_state.ai_prompt)
+    if st.button("🎨 測試渲染"):
+        if not user_replicate_key or not uploaded_file:
+            st.error("資料不全")
         else:
-            with st.spinner("AI 正在繪圖中..."):
-                try:
-                    with open("temp_upload.jpg", "wb") as f:
-                        f.write(uploaded_file.getbuffer())
-                    
-                    with open("temp_upload.jpg", "rb") as image_file:
-                        output = replicate.run(
-                            "jagilley/controlnet-canny:aff48af9c68d162388d230a2ab003f68d2638d88307bdaf1c2f1ac95079c9613",
-                            input={
-                                "image": image_file,
-                                "prompt": final_prompt,
-                                "negative_prompt": n_prompt,
-                                "image_resolution": 768,
-                                "scale": 9.0,
-                                "return_image": True 
-                            }
-                        )
-                    image_url = output[1] if isinstance(output, list) else output
-                    st.success("渲染完成！")
-                    st.image(image_url, caption="AI 效果圖", use_column_width=True)
-                except Exception as e:
-                    st.error(f"渲染失敗: {e}")
+            # (這裡省略複雜代碼，僅做連線測試)
+            st.info("渲染功能暫時略過，先解決 Gemini 連線問題。")
