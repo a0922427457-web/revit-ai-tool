@@ -3,103 +3,168 @@ import replicate
 import requests
 import os
 import base64
-import io
+import json
 from PIL import Image
+import io
 
-# --- 頁面設定 ---
-st.set_page_config(page_title="Revit 渲染站 (診斷版)", layout="wide", page_icon="🔧")
-st.title("🔧 系統診斷模式")
-st.warning("目前處於偵錯模式，若發生錯誤將會顯示詳細代碼。")
+# --- 1. 頁面設定 ---
+st.set_page_config(page_title="Revit 智慧渲染站", layout="wide", page_icon="🏢")
+st.markdown("""
+<style>
+#MainMenu {visibility: hidden;}
+footer {visibility: hidden;}
+</style>
+""", unsafe_allow_html=True)
 
-# --- 初始化 ---
+st.title("🏢 公司專用：Revit 模型 AI 渲染器 (自動偵測版)")
+
+# --- 2. 初始化 Session State ---
 if "ai_prompt" not in st.session_state:
     st.session_state.ai_prompt = ""
+if "valid_model_name" not in st.session_state:
+    st.session_state.valid_model_name = None
 
-# --- 讀取金鑰 ---
-# 優先從 Secrets 讀取
+# --- 3. 讀取金鑰 ---
 replicate_api = st.secrets.get("REPLICATE_API_TOKEN")
 gemini_key = st.secrets.get("GOOGLE_API_KEY")
 
-# 側邊欄強制顯示金鑰輸入框 (方便測試)
-st.sidebar.header("🔑 金鑰測試區")
-user_gemini_key = st.sidebar.text_input("在此手動輸入 Gemini Key (排除 Secrets 設定錯誤)", value=gemini_key if gemini_key else "", type="password")
-user_replicate_key = st.sidebar.text_input("Replicate Token", value=replicate_api if replicate_api else "", type="password")
+# 側邊欄輸入
+st.sidebar.header("🔑 設定")
+if not replicate_api:
+    replicate_api = st.sidebar.text_input("Replicate Token", type="password")
+if not gemini_key:
+    gemini_key = st.sidebar.text_input("Gemini API Key", type="password")
 
-# --- 診斷用連線函數 ---
-def debug_gemini(api_key, image):
-    # 轉檔
+if replicate_api:
+    os.environ["REPLICATE_API_TOKEN"] = replicate_api
+
+# --- 4. 關鍵功能：自動尋找可用模型 ---
+def find_working_model(api_key):
+    # 問 Google: "請給我你的菜單 (ListModels)"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
+    try:
+        response = requests.get(url)
+        if response.status_code == 200:
+            models_data = response.json()
+            st.toast("✅ 成功取得模型清單！正在挑選...", icon="🤖")
+            
+            # 優先順序：最新的 Flash -> 最新的 Pro -> 舊版 Vision
+            preferred_keywords = ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-pro-vision"]
+            
+            # 1. 先列出所有支援 'generateContent' 的模型
+            available_models = []
+            if 'models' in models_data:
+                for m in models_data['models']:
+                    if "generateContent" in m.get("supportedGenerationMethods", []):
+                        # 去掉 'models/' 前綴，只留名稱
+                        clean_name = m['name'].replace("models/", "")
+                        available_models.append(clean_name)
+            
+            # 2. 顯示給使用者看 (除錯用)
+            with st.expander("👀 Google 提供的可用模型清單 (點我查看)"):
+                st.write(available_models)
+
+            # 3. 挑選最佳模型
+            for keyword in preferred_keywords:
+                for model in available_models:
+                    if keyword in model:
+                        return model # 找到就回傳
+            
+            # 4. 如果都沒找到喜歡的，就隨便回傳第一個有 'vision' 功能的
+            for model in available_models:
+                if "vision" in model:
+                    return model
+                    
+            return None # 真的沒菜了
+        else:
+            st.error(f"無法取得模型清單: {response.text}")
+            return None
+    except Exception as e:
+        st.error(f"連線錯誤: {e}")
+        return None
+
+# --- 5. 執行連線 ---
+def call_gemini_dynamic(api_key, model_name, image, style_text):
     buffered = io.BytesIO()
     image.save(buffered, format="JPEG")
     img_str = base64.b64encode(buffered.getvalue()).decode()
 
-    # 測試最標準的模型
-    target_model = "gemini-1.5-flash"
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{target_model}:generateContent?key={api_key}"
-    
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
     headers = {'Content-Type': 'application/json'}
     data = {
         "contents": [{
             "parts": [
-                {"text": "Describe this building in 10 words."}, # 簡單指令測試
+                {"text": f"You are an architectural visualizer. Look at this image. Create a detailed English prompt for ControlNet. Describe the building geometry, materials, and lighting. Style: {style_text}. Format: Keywords separated by commas. No sentences."},
                 {"inline_data": {"mime_type": "image/jpeg", "data": img_str}}
             ]
         }]
     }
+    
+    response = requests.post(url, headers=headers, json=data)
+    if response.status_code == 200:
+        return response.json()['candidates'][0]['content']['parts'][0]['text']
+    else:
+        return f"Error: {response.text}"
 
-    try:
-        response = requests.post(url, headers=headers, json=data, timeout=30)
-        
-        # 顯示詳細診斷資訊
-        st.write("---")
-        st.write(f"📡 嘗試連線模型: `{target_model}`")
-        st.write(f"📡 HTTP 狀態碼: `{response.status_code}`")
-        
-        if response.status_code == 200:
-            return "SUCCESS", response.json()
-        else:
-            # 回傳完整的錯誤訊息
-            return "ERROR", response.text
-            
-    except Exception as e:
-        return "CRITICAL_ERROR", str(e)
-
-# --- 介面 ---
+# --- 6. 介面佈局 ---
 col1, col2 = st.columns([1, 1])
 
 with col1:
-    st.subheader("1. 診斷測試")
-    uploaded_file = st.file_uploader("上傳一張小圖片進行測試", type=["jpg", "png", "jpeg"])
+    st.subheader("1. 上傳模型圖片")
+    uploaded_file = st.file_uploader("請上傳 JPG/PNG", type=["jpg", "png", "jpeg"])
     
-    if uploaded_file and st.button("🚨 開始診斷"):
-        if not user_gemini_key:
-            st.error("❌ 沒有偵測到 API Key！請在左側輸入。")
-        else:
-            image = Image.open(uploaded_file)
-            st.info("正在發送請求給 Google...")
-            
-            # 執行診斷
-            status, result = debug_gemini(user_gemini_key, image)
-            
-            if status == "SUCCESS":
-                st.success("✅ 連線成功！API Key 運作正常。")
-                st.json(result) # 顯示成功的回傳資料
-                # 這裡簡單抓取文字
-                try:
-                    text = result['candidates'][0]['content']['parts'][0]['text']
-                    st.session_state.ai_prompt = text
-                except:
-                    pass
+    if uploaded_file:
+        image = Image.open(uploaded_file)
+        st.image(image, caption="原始模型", use_column_width=True)
+
+        st.subheader("2. 環境設定")
+        style_option = st.selectbox("選擇風格", ["Modern Glass", "Concrete Brutalist", "Industrial Brick", "Wooden Resort"])
+        
+        if st.button("✨ 呼叫 Gemini 分析模型"):
+            if not gemini_key:
+                st.error("缺少 Gemini Key！")
             else:
-                st.error("❌ 連線失敗")
-                st.write("👇 **請把下面這段錯誤訊息截圖或複製給我：**")
-                st.code(result, language="json")
+                with st.spinner("1/2 正在掃描可用模型..."):
+                    # 如果還沒找過模型，先找一次
+                    if not st.session_state.valid_model_name:
+                        found_model = find_working_model(gemini_key)
+                        if found_model:
+                            st.session_state.valid_model_name = found_model
+                            st.success(f"已鎖定可用模型: {found_model}")
+                        else:
+                            st.error("❌ 找不到任何可用的 Gemini 模型，請檢查 API Key 權限。")
+                            st.stop()
+                
+                if st.session_state.valid_model_name:
+                    with st.spinner(f"2/2 正在使用 {st.session_state.valid_model_name} 分析圖片..."):
+                        result = call_gemini_dynamic(gemini_key, st.session_state.valid_model_name, image, style_option)
+                        if "Error" in result:
+                            st.error(result)
+                        else:
+                            st.session_state.ai_prompt = result + ", photorealistic, 8k, architectural photography"
+                            st.success("分析成功！")
+                            st.rerun()
 
 with col2:
-    st.subheader("2. 渲染測試")
-    final_prompt = st.text_area("提示詞", value=st.session_state.ai_prompt)
-    if st.button("🎨 測試渲染"):
-        if not user_replicate_key or not uploaded_file:
+    st.subheader("3. 渲染操作")
+    final_prompt = st.text_area("提示詞", value=st.session_state.ai_prompt, height=150)
+    n_prompt = st.text_input("負面提示詞", "low quality, blurry, text, watermark, bad perspective, deformed, people, ugly")
+    
+    if st.button("🎨 開始渲染"):
+        if not replicate_api or not uploaded_file:
             st.error("資料不全")
         else:
-            # (這裡省略複雜代碼，僅做連線測試)
-            st.info("渲染功能暫時略過，先解決 Gemini 連線問題。")
+            with st.spinner("AI 繪圖中..."):
+                try:
+                    with open("temp_upload.jpg", "wb") as f:
+                        f.write(uploaded_file.getbuffer())
+                    with open("temp_upload.jpg", "rb") as image_file:
+                        output = replicate.run(
+                            "jagilley/controlnet-canny:aff48af9c68d162388d230a2ab003f68d2638d88307bdaf1c2f1ac95079c9613",
+                            input={"image": image_file, "prompt": final_prompt, "negative_prompt": n_prompt, "return_image": True}
+                        )
+                    image_url = output[1] if isinstance(output, list) else output
+                    st.success("渲染完成！")
+                    st.image(image_url, use_column_width=True)
+                except Exception as e:
+                    st.error(f"渲染失敗: {e}")
