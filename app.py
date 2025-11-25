@@ -35,7 +35,7 @@ if not gemini_key:
 if replicate_api:
     os.environ["REPLICATE_API_TOKEN"] = replicate_api
 
-# --- 4. 核心邏輯：雙圖分析與指令融合 ---
+# --- 4. 核心邏輯 ---
 def call_gemini_advanced(api_key, model_image, ref_image, style_text, user_text):
     content_parts = []
     
@@ -69,7 +69,7 @@ def call_gemini_advanced(api_key, model_image, ref_image, style_text, user_text)
 
     content_parts.append({"text": "Output format: English keywords separated by commas. No sentences. End with: photorealistic, 8k, architectural photography, cinematic lighting."})
 
-    # 使用你清單上確認有的 2.0-flash
+    # 目標模型 (gemini-2.0-flash)
     target_model = "gemini-2.0-flash"
     
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{target_model}:generateContent?key={api_key}"
@@ -136,7 +136,6 @@ with col2:
     
     with st.expander("🛠️ 進階參數"):
         creativity = st.slider("創意度 (Scale)", 5.0, 20.0, 9.0)
-        # 注意：ControlNet 的強度通常是 0.0 到 2.0，這裡沒問題
         strength = st.slider("線條鎖定強度", 0.0, 2.0, 1.0)
 
     if st.button("🎨 開始渲染 (Start Render)"):
@@ -155,15 +154,24 @@ with col2:
                                 "image": image_file,
                                 "prompt": final_prompt,
                                 "negative_prompt": n_prompt,
-                                "image_resolution": "768",  # <--- 修正處：加上了雙引號，變成文字格式
+                                "image_resolution": "768",
                                 "scale": creativity,
                                 "return_image": True 
                             }
                         )
-                    image_url = output[1] if isinstance(output, list) else output
+                    
+                    # --- 關鍵修正處 ---
+                    # 1. 強制轉換成字串 (str)，解決 FileOutput 錯誤
+                    # 2. 如果回傳是列表，取第 2 張圖 (通常第 1 張是線稿，第 2 張是渲染圖)
+                    if isinstance(output, list):
+                        image_url = str(output[1])
+                    else:
+                        image_url = str(output)
+                        
                     st.success("渲染完成！")
                     st.image(image_url, use_column_width=True)
+                    
                 except Exception as e:
                     st.error(f"渲染失敗: {e}")
                     if "402" in str(e):
-                        st.warning("💡 提示：Replicate 額度不足，請儲值。")
+                        st.warning("💡 提示：Replicate 額度不足。")
