@@ -7,7 +7,7 @@ import json
 from PIL import Image
 import io
 
-# --- 1. 頁面基礎設定 ---
+# --- 1. 頁面設定 ---
 st.set_page_config(page_title="Revit 智慧渲染站", layout="wide", page_icon="🏢")
 st.markdown("""
 <style>
@@ -16,7 +16,7 @@ footer {visibility: hidden;}
 </style>
 """, unsafe_allow_html=True)
 
-st.title("🏢 公司專用：Revit 模型 AI 渲染器")
+st.title("🏢 公司專用：Revit 模型 AI 渲染器 (自動切換版)")
 
 # --- 2. 初始化 Session State ---
 if "ai_prompt" not in st.session_state:
@@ -34,17 +34,22 @@ if not gemini_key:
 if replicate_api:
     os.environ["REPLICATE_API_TOKEN"] = replicate_api
 
-# --- 4. 萬能連線函數 (不依賴套件) ---
+# --- 4. 萬能連線函數 (自動嘗試多種模型) ---
 def call_gemini_vision(api_key, image, style_text):
-    # 1. 將圖片轉成 Base64 格式 (Gemini API 要求的格式)
+    # 圖片轉碼
     buffered = io.BytesIO()
     image.save(buffered, format="JPEG")
     img_str = base64.b64encode(buffered.getvalue()).decode()
 
-    # 2. 設定 API 網址 (直接連線最新版 1.5 Flash)
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
-    
-    # 3. 準備傳送的資料
+    # 準備我們要嘗試的模型清單 (如果第一個失敗，就試下一個)
+    # 包含了最新版、穩定版、跟特定版號
+    models_to_try = [
+        "gemini-1.5-flash-latest", # 最新版 Flash
+        "gemini-1.5-flash-001",    # 指定版號 Flash
+        "gemini-1.5-pro-latest",   # 最新版 Pro (比較慢但強大)
+        "gemini-1.5-pro-001"       # 指定版號 Pro
+    ]
+
     headers = {'Content-Type': 'application/json'}
     data = {
         "contents": [{
@@ -58,18 +63,27 @@ def call_gemini_vision(api_key, image, style_text):
         }]
     }
 
-    # 4. 發送請求
-    response = requests.post(url, headers=headers, json=data)
-    
-    # 5. 解析結果
-    if response.status_code == 200:
-        result = response.json()
+    # 開始迴圈嘗試
+    for model_name in models_to_try:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
         try:
-            return result['candidates'][0]['content']['parts'][0]['text']
-        except:
-            return "Error: 無法解析 Gemini 回傳的資料"
-    else:
-        return f"Error {response.status_code}: {response.text}"
+            response = requests.post(url, headers=headers, json=data, timeout=30)
+            
+            if response.status_code == 200:
+                # 成功！解析結果
+                result = response.json()
+                text = result['candidates'][0]['content']['parts'][0]['text']
+                return f"SUCCESS|{model_name}|{text}" # 回傳成功標記
+            else:
+                # 失敗，印出這個模型為何失敗，然後繼續下一個
+                print(f"嘗試 {model_name} 失敗: {response.status_code}")
+                continue 
+        except Exception as e:
+            print(f"連線錯誤: {e}")
+            continue
+
+    # 如果全部都失敗
+    return "ERROR|所有模型都嘗試失敗，請檢查 API Key 是否正確或有權限限制。"
 
 # --- 5. 介面佈局 ---
 col1, col2 = st.columns([1, 1])
@@ -92,16 +106,19 @@ with col1:
             if not gemini_key:
                 st.error("缺少 Gemini Key！")
             else:
-                with st.spinner("Gemini 正在觀察你的設計..."):
-                    # 使用我們手寫的萬能連線函數
-                    result_text = call_gemini_vision(gemini_key, image, style_option)
+                with st.spinner("Gemini 正在嘗試連線 (會自動切換模型)..."):
+                    # 呼叫自動切換函數
+                    result_raw = call_gemini_vision(gemini_key, image, style_option)
                     
-                    if "Error" in result_text:
-                        st.error(result_text)
-                    else:
-                        st.session_state.ai_prompt = result_text + ", photorealistic, 8k, architectural photography, cinematic lighting"
-                        st.success("分析完成！")
+                    if result_raw.startswith("ERROR"):
+                        st.error(result_raw.split("|")[1])
+                    elif result_raw.startswith("SUCCESS"):
+                        _, model_used, prompt_text = result_raw.split("|", 2)
+                        st.success(f"分析成功！(使用模型: {model_used})")
+                        st.session_state.ai_prompt = prompt_text + ", photorealistic, 8k, architectural photography, cinematic lighting"
                         st.rerun()
+                    else:
+                        st.error("未知錯誤")
 
 with col2:
     st.subheader("3. 渲染操作")
@@ -116,7 +133,6 @@ with col2:
         else:
             with st.spinner("AI 正在繪圖中..."):
                 try:
-                    # 圖片轉存處理
                     with open("temp_upload.jpg", "wb") as f:
                         f.write(uploaded_file.getbuffer())
                     
