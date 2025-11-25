@@ -35,41 +35,47 @@ if not gemini_key:
 if replicate_api:
     os.environ["REPLICATE_API_TOKEN"] = replicate_api
 
-# --- 4. 核心邏輯 ---
-def call_gemini_advanced(api_key, model_image, ref_image, style_text, user_text):
+# --- 4. 核心邏輯：Gemini 分析 ---
+def call_gemini_advanced(api_key, model_image, ref_image, style_text, user_text, is_clean_mode):
     content_parts = []
     
-    # 指令
+    # 根據是否開啟「專注模式」調整 AI 指令
+    background_instruction = ""
+    if is_clean_mode:
+        background_instruction = "IMPORTANT: Keep the background CLEAN and MINIMAL. Use a studio lighting setting or simple sky. Do NOT invent complex landscapes, forests, or cities around the building."
+    else:
+        background_instruction = "Generate a realistic environment suitable for the building."
+
     system_instruction = f"""
     You are an expert architectural visualizer. 
     Task: Create a highly detailed Stable Diffusion prompt for ControlNet.
     1. Base Geometry: Analyze the FIRST image (Line Drawing). Keep the geometry description accurate.
     2. Target Style: {style_text}.
+    3. Background: {background_instruction}
     """
     content_parts.append({"text": system_instruction})
     
-    # 第一張圖：Revit 線稿
+    # Model Image
     buf_model = io.BytesIO()
     model_image.save(buf_model, format="JPEG")
     img_model_str = base64.b64encode(buf_model.getvalue()).decode()
     content_parts.append({"inline_data": {"mime_type": "image/jpeg", "data": img_model_str}})
     content_parts.append({"text": "Above is the GEOMETRY (Revit Model)."})
 
-    # 第二張圖：參考圖
+    # Reference Image
     if ref_image:
         buf_ref = io.BytesIO()
         ref_image.save(buf_ref, format="JPEG")
         img_ref_str = base64.b64encode(buf_ref.getvalue()).decode()
         content_parts.append({"inline_data": {"mime_type": "image/jpeg", "data": img_ref_str}})
-        content_parts.append({"text": "Above is the STYLE REFERENCE. Adopt its materials and lighting, but DO NOT change the geometry."})
+        content_parts.append({"text": "Above is the STYLE REFERENCE. Adopt its materials and lighting."})
     
-    # 使用者指令
+    # User Input
     if user_text:
         content_parts.append({"text": f"User's specific requirements (Translate to English keywords): {user_text}"})
 
-    content_parts.append({"text": "Output format: English keywords separated by commas. No sentences. End with: photorealistic, 8k, architectural photography, cinematic lighting."})
+    content_parts.append({"text": "Output format: English keywords separated by commas. No sentences. End with: architectural photography."})
 
-    # 目標模型 (gemini-2.0-flash)
     target_model = "gemini-2.0-flash"
     
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{target_model}:generateContent?key={api_key}"
@@ -98,10 +104,8 @@ with col1:
     st.write("---")
     
     uploaded_ref = st.file_uploader("🎨 上傳風格參考圖 (選填)", type=["jpg", "png", "jpeg"])
-    image_ref = None
     if uploaded_ref:
-        image_ref = Image.open(uploaded_ref)
-        st.image(image_ref, caption="風格參考", width=300)
+        st.image(uploaded_ref, caption="風格參考", width=300)
 
     st.write("---")
     st.subheader("2. 設計指令")
@@ -113,14 +117,21 @@ with col1:
     
     user_input = st.text_area("✍️ 額外指令 (中文)", height=80)
     
+    # --- 新增：專注模式開關 ---
+    clean_mode = st.checkbox("🎯 專注模型 (純淨背景/不亂加配景)", value=True, help="勾選後，AI 會使用攝影棚光或乾淨天空，並強制移除樹木、街道、人車。")
+    
     if st.button("✨ 呼叫 Gemini 融合分析"):
         if not gemini_key:
             st.error("缺少 Gemini Key！")
         elif not uploaded_file:
             st.error("請上傳模型圖片！")
         else:
-            with st.spinner("Gemini 正在思考..."):
-                result = call_gemini_advanced(gemini_key, image_model, image_ref, style_option, user_input)
+            with st.spinner("Gemini 正在分析 (已啟用專注模式)..." if clean_mode else "Gemini 正在分析..."):
+                ref_img_obj = Image.open(uploaded_ref) if uploaded_ref else None
+                
+                # 傳入 clean_mode 參數
+                result = call_gemini_advanced(gemini_key, image_model, ref_img_obj, style_option, user_input, clean_mode)
+                
                 if "Error" in result:
                     st.error("分析失敗")
                     st.code(result)
@@ -130,9 +141,22 @@ with col1:
                     st.rerun()
 
 with col2:
-    st.subheader("3. 渲染與微調")
-    final_prompt = st.text_area("最終提示詞", value=st.session_state.ai_prompt, height=200)
-    n_prompt = st.text_input("負面提示詞", "low quality, blurry, text, watermark, bad perspective, deformed, people, ugly, cars")
+    st.subheader("3. 渲染設定與執行")
+    
+    col_opt1, col_opt2 = st.columns(2)
+    with col_opt1:
+        season = st.selectbox("🍂 季節", ["無指定 (None)", "春季 (Spring)", "夏季 (Summer)", "秋季 (Autumn)", "冬季 (Winter)"])
+        weather = st.selectbox("⛈️ 天氣", ["晴朗 (Sunny)", "多雲 (Cloudy)", "陰天 (Overcast)", "下雨 (Rainy)", "起霧 (Foggy)", "下雪 (Snowy)"])
+    
+    with col_opt2:
+        resolution = st.selectbox("📐 出圖大小", ["512", "768", "1024"], index=1)
+        quality_mode = st.radio("💎 出圖品質", ["標準 (快速)", "高品質 (較慢)"], index=0)
+
+    base_prompt = st.text_area("AI 生成的基礎提示詞", value=st.session_state.ai_prompt, height=150)
+    
+    # 預設的負面提示詞
+    default_negative = "low quality, blurry, text, watermark, bad perspective, deformed"
+    n_prompt = st.text_input("負面提示詞", value=default_negative)
     
     with st.expander("🛠️ 進階參數"):
         creativity = st.slider("創意度 (Scale)", 5.0, 20.0, 9.0)
@@ -144,6 +168,28 @@ with col2:
         else:
             with st.spinner("AI 正在繪圖中..."):
                 try:
+                    # 1. 處理 Prompt (加入季節天氣)
+                    added_prompts = []
+                    
+                    # 如果開啟「專注模式」，強制加入攝影棚關鍵字
+                    if clean_mode:
+                        added_prompts.append("clean background, studio lighting, minimal environment, clear sky")
+                    else:
+                        # 只有在非專注模式下，才強調季節天氣 (避免衝突)
+                        if "None" not in season: added_prompts.append(season.split("(")[1].replace(")", ""))
+                        if "None" not in weather: added_prompts.append(weather.split("(")[1].replace(")", ""))
+                    
+                    added_prompts.append("photorealistic, 8k, masterpiece, highly detailed")
+                    final_full_prompt = f"{base_prompt}, {', '.join(added_prompts)}"
+
+                    # 2. 處理負面提示詞 (如果是專注模式，要加強禁止項目)
+                    final_negative = n_prompt
+                    if clean_mode:
+                        final_negative += ", trees, forest, city, street, cars, people, landscape, complex background, busy street, mountains"
+
+                    # 3. 設定品質
+                    num_steps = 50 if quality_mode == "高品質 (較慢)" else 20
+
                     with open("temp_model.jpg", "wb") as f:
                         f.write(uploaded_file.getbuffer())
                     
@@ -152,17 +198,15 @@ with col2:
                             "jagilley/controlnet-canny:aff48af9c68d162388d230a2ab003f68d2638d88307bdaf1c2f1ac95079c9613",
                             input={
                                 "image": image_file,
-                                "prompt": final_prompt,
-                                "negative_prompt": n_prompt,
-                                "image_resolution": "768",
+                                "prompt": final_full_prompt,
+                                "negative_prompt": final_negative, # 使用加強版的負面提示詞
+                                "image_resolution": resolution,
                                 "scale": creativity,
+                                "ddim_steps": num_steps,
                                 "return_image": True 
                             }
                         )
                     
-                    # --- 關鍵修正處 ---
-                    # 1. 強制轉換成字串 (str)，解決 FileOutput 錯誤
-                    # 2. 如果回傳是列表，取第 2 張圖 (通常第 1 張是線稿，第 2 張是渲染圖)
                     if isinstance(output, list):
                         image_url = str(output[1])
                     else:
@@ -174,4 +218,4 @@ with col2:
                 except Exception as e:
                     st.error(f"渲染失敗: {e}")
                     if "402" in str(e):
-                        st.warning("💡 提示：Replicate 額度不足。")
+                        st.warning("💡 Replicate 額度不足。")
